@@ -2,41 +2,46 @@
 # Serial version, implement in PyTorch.
 import random
 import numpy as np
-import pandas as pd
 import torch
 from torch import nn
 from sklearn.metrics.pairwise import cosine_similarity
 
+from generate_uimatrix import load_data
 from FLModel import LocalFCFModel, ServerFCFModel
 
 
 class FederatedCF(object):
-    def __init__(self, data_path, attacker=0, defense_alg=False):
+    def __init__(self, data_path, attack_par, detection_alg):
         self.client_num = None
         self.NUM_USER = None
         self.NUM_MOVIE = None
         self.E = 1      # each client perform E-round iteration between each communication round
-        self.attacker = attacker            # number of attackers (malicious user)
-        self.defense_alg = defense_alg      # whether use defense algorithm to avoid attackers
-        self.alpha = []                     # re-scale lr of each clients (``FoolsGold" Alg.)
-        self.cs = None                      # St-weighted cosine similarity for ``FoolsGold" Alg.
 
-        self.clients = None         # a list of client models
-        self.server_model = None    # the server model
+        self.attacker_num = int(attack_par['num'])      # number of attackers (malicious user)
+        self.target_item = int(attack_par['target'])    # the target item
+        self.fill_item_num = int(attack_par['fill'])    # number of fill items
+        self.attack_model = attack_par['model']    # type of attack (e.g. random attack, average attack, etc.)
+        self.detection_alg = detection_alg         # whether use detection algorithm to avoid attackers
+        self.alpha = []                            # re-scale lr of each clients (``FoolsGold" Alg.)
+        # self.cs = None                           # St-weighted cosine similarity for ``FoolsGold" Alg.
 
-        self.test_case = None       # test case (20% of total rating data)
-        self.rating = None          # global rating record, rating[i] represent for the rating record of user $i$
-        self.user_factor = None     # local factor vector, shape=(#users, #features)
-        self.item_factor = None     # shared factor vector, shape=(#features, #movies)
-        self.mask = None            # mask matrix, mask = (rating > 1)
+        self.clients = None             # a list of client models
+        self.server_model = None        # the server model
 
-        self.feature = 5    # feature is 50 by default
+        self.test_case = None           # test case (20% of total rating data)
+        self.global_test_case = None    # global test case which not include target item (10% of total data)
+        self.rating = None              # global rating record, rating[i] represent for the rating record of user $i$
+        self.user_factor = None         # local factor vector, shape=(#users, #features)
+        self.item_factor = None         # shared factor vector, shape=(#features, #movies)
+        self.mask = None                # mask matrix, mask = (rating > 1)
+
+        self.feature = 5    # feature is 5 by default
         self.Lambda = 0.02  # penalty factor
 
         self.client_lr = None  # Python List with NUM_USER lr for each client
         self.server_lr = 1e-2
 
-        self.device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
         self.load_data(data_path)
         self.init_model()
@@ -77,7 +82,8 @@ class FederatedCF(object):
             self.clients[uid].add_his_grad(grads[-1])
             torch.cuda.empty_cache()
         # update the alpha
-        if self.defense_alg:
+        if self.detection_alg:
+            # pass    # TODO: implement shilling attack detection algorithm
             self.FoolsGold()
             for i in range(len(grads)):
                 grads[i] *= self.alpha[i]
@@ -103,12 +109,19 @@ class FederatedCF(object):
         Calculate the RMSE of current model of test set
         """
         predict = [self.clients[uid].forward(self.server_model.get_item_factor()).cpu().detach()
-                   for uid in range(self.client_num-self.attacker)]
+                   for uid in range(self.client_num-self.attacker_num)]
         loss = 0.0
         for (uid, item, target) in self.test_case:
             loss += (predict[uid][0][item] - target)**2
         loss /= float(len(self.test_case))
-        return np.sqrt(loss)
+        target_rmse = np.sqrt(loss)
+
+        loss = 0.0
+        for (uid, item, target) in self.global_test_case:
+            loss += (predict[uid][0][item] - target)**2
+        loss /= float(len(self.global_test_case))
+        global_rmse = np.sqrt(loss)
+        return target_rmse, global_rmse
 
     def set_loc_iter_round(self, loc_round):
         self.E = loc_round
@@ -125,51 +138,37 @@ class FederatedCF(object):
             for uid in range(self.client_num):
                 self.clients[uid].lr = client_lr
 
-    def save_global_model(self, _round):
-        """Return the global model -- user and item matrix"""
-        global_user_factor = torch.concat(self.user_factor, 0)
-        np.save("FCF_item_" + str(_round) + "_rnd.npy", self.item_factor)
-        np.save("FCF_user_" + str(_round) + "_rnd.npy", global_user_factor)
+    def save_delta_item(self, path):
+        """save local item matrix"""
+        for uid in range(self.client_num):
+            grads_his = self.clients[uid].H
+            for _round in range(len(grads_his)):
+                np.save(path + 'client_' + str(uid) + '_' + str(_round+1) + "_rnd.npy", grads_his[_round])
+            grad_sum = sum(grads_his)
+            np.save(path + 'client_' + str(uid) + '_grad_sum.npy', np.array(grad_sum))
 
     def load_data(self, data_path):
         """
         Generate federated learning data
         Return user-item matrix (2D - numpy array, shape=(# users, # movies))
         """
-        #data_file = "rating.npy"
-        data_file = "1m_rating.npy"
+        data_file = "rating.npy"
         """ Construct Rating Matrix """
         try:
-            rating = np.load(data_file)
+            rating = np.load(data_path + data_file)
         except FileNotFoundError:
             print("FileNotFound, construct rating matrix.")
-            ratings_df = pd.read_csv(data_path + 'ratings.dat', sep='::', names=['userId', 'movieId', 'rating', 'Time'])
-            movies_df = pd.read_csv(data_path + 'movies.dat', sep='::', names=['movieId', 'name', 'type'])
-            self.NUM_USER = ratings_df['userId'].drop_duplicates().size
-            self.NUM_MOVIE = movies_df.index.size
+            rating = load_data(data_path)
 
-            movie_id_mapping = {}
-            id_count = 1
-            for i in movies_df['movieId']:
-                movie_id_mapping[int(i)] = int(id_count)
-                id_count += 1
-
-            rating = np.zeros((self.NUM_USER, self.NUM_MOVIE), dtype=np.float32)
-            for index, row in ratings_df.iterrows():
-                row_id = int(row['userId']) - 1
-                col_id = movie_id_mapping[int(row['movieId'])] - 1
-                rating[row_id][col_id] = row['rating']
-            np.save(data_file, rating)
+        self.NUM_MOVIE = rating.shape[1]
+        # rating, self.test_case = self.split_dataset(rating)
+        rating, self.test_case, self.global_test_case = self.split_shilling_data(rating)
 
         # Add attackers
-        if self.attacker > 0:
-            rating = self.add_attacker(self.attacker, rating)
+        if self.attacker_num > 0:
+            rating = self.add_shilling_attacker(rating)
 
         self.NUM_USER = rating.shape[0]
-        self.NUM_MOVIE = rating.shape[1]
-
-        rating, self.test_case = self.split_dataset(rating)
-
         self.client_num = self.NUM_USER
         self.rating = torch.tensor(rating).to(self.device)
         self.mask = (self.rating > 0)*1.0
@@ -195,7 +194,60 @@ class FederatedCF(object):
                 rating[uid][i] = 0
         return rating, test_case
 
-    def add_attacker(self, attacker_num, rating):
+    def split_shilling_data(self, rating):
+        # get uid
+        uid_list = []
+        test_case = []
+        for uid in range(rating.shape[0]):
+            if rating[uid][self.target_item] > 0:
+                uid_list.append(uid)
+        selected_uid = random.sample(uid_list, int(len(uid_list)/5))
+        for uid in selected_uid:
+            test_case.append((uid, self.target_item, rating[uid][self.target_item]))
+            rating[uid][self.target_item] = 0.0
+
+        # global test case: for each client, take 10% rating records as test cases (not include target item)
+        rating_num = ((rating > 0) * 1.0).sum(1)
+        global_test_case = []
+        for uid in range(rating.shape[0]):
+            index = list(np.where(rating[uid] > 0.1)[0])
+            test_sample = random.sample(index, int(0.1 * rating_num[uid]))
+            for i in test_sample:
+                global_test_case.append((uid, i, rating[uid][i]))
+                rating[uid][i] = 0.0
+        return rating, test_case, global_test_case
+
+    def add_shilling_attacker(self, rating):
+        att_data = np.zeros((self.attacker_num, self.NUM_MOVIE))
+        if self.attack_model == 'average':
+            avg_rat = rating.sum(axis=0)
+            mask = (rating > 0).sum(axis=0)
+            avg_rat = avg_rat / mask
+            for uid in range(self.attacker_num):
+                fill_items = random.sample(range(self.NUM_MOVIE), self.fill_item_num)  # fill items' id
+                for mid in fill_items:
+                    att_data[uid][mid] = avg_rat[mid]
+                att_data[uid][self.target_item] = 1.0
+            rating = np.row_stack((rating, att_data))
+
+        elif self.attack_model == 'uniform':
+            for uid in range(self.attacker_num):
+                fill_items = random.sample(range(self.NUM_MOVIE), self.fill_item_num)  # fill items' id
+                for mid in fill_items:
+                    att_data[uid][mid] = random.uniform(1, 5)
+                att_data[uid][self.target_item] = 1.0
+            rating = np.row_stack((rating, att_data))
+
+        elif self.attack_model == 'random':
+            for uid in range(self.attacker_num):
+                fill_items = random.sample(range(self.NUM_MOVIE), self.fill_item_num)  # fill items' id
+                for mid in fill_items:
+                    att_data[uid][mid] = random.gauss(mu=3.6, sigma=1.1)
+                att_data[uid][self.target_item] = 1.0
+            rating = np.row_stack((rating, att_data))
+        return rating
+
+    def add_sybils_attacker(self, attacker_num, rating):
         """Add attacker into the FL system"""
         items = rating.shape[1]
         total_record = (rating > 0.1).sum()
@@ -217,7 +269,7 @@ class FederatedCF(object):
         The attacker's gradients will be penalized
         """
         # flatten gradients (matrix) into vectors
-        H = [self.clients[uid].H.cpu().numpy().flatten() for uid in range(self.client_num)]
+        H = [sum(self.clients[uid].H).cpu().numpy().flatten() for uid in range(self.client_num)]
 
         # calculate CS_ij
         H = np.array(H)

@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import nn
-
+from generate_uimatrix import load_data
 
 class CFModel(nn.Module):
     """Collaborative Filtering Model in Pytorch"""
@@ -35,6 +35,7 @@ class CollaborativeFiltering(object):
         self.model = None  # user(X)&item(Y) factor vector, shape(X)=(#users, #features), shape(Y)=(#features, #movies)
         self.mask = None  # mask matrix, mask = (rating > 1)
         self.test_case = None  # test case (20% of total rating data)
+        self.attacker_num = -1
 
         self.feature = 5  # feature is 10 by default
         self.Lambda = 0.02  # penalty factor
@@ -102,36 +103,24 @@ class CollaborativeFiltering(object):
     def load_data(self, data_path):
         """
         Generate federated learning data
-        :param data_path:
-        :return: user-item matrix (2D - numpy array, shape=(# users, # movies))
+        Return user-item matrix (2D - numpy array, shape=(# users, # movies))
         """
-        data_file = "1m_rating.npy"
+        data_file = "rating.npy"
+        """ Construct Rating Matrix """
         try:
-            rating = np.load(data_file)
-            self.NUM_USER = rating.shape[0]
-            self.NUM_MOVIE = rating.shape[1]
+            rating = np.load(data_path + data_file)
         except FileNotFoundError:
             print("FileNotFound, construct rating matrix.")
-            ratings_df = pd.read_csv(data_path + 'ratings.dat', sep='::', names=['userId', 'movieId', 'rating', 'Time'])
-            movies_df = pd.read_csv(data_path + 'movies.dat', sep='::', names=['movieId', 'name', 'type'])
-            self.NUM_USER = ratings_df['userId'].drop_duplicates().size
-            self.NUM_MOVIE = movies_df.index.size
+            rating = load_data(data_path)
 
-            movie_id_mapping = {}
-            id_count = 1
-            for i in movies_df['movieId']:
-                movie_id_mapping[int(i)] = int(id_count)
-                id_count += 1
+        # Add attackers
+        if self.attacker_num > 0:
+            rating = self.add_shilling_attacker(rating)
 
-            rating = np.zeros((self.NUM_USER, self.NUM_MOVIE), dtype=np.float32)
-            for index, row in ratings_df.iterrows():
-                row_id = int(row['userId']) - 1
-                col_id = movie_id_mapping[int(row['movieId'])] - 1
-                rating[row_id][col_id] = row['rating']
-            np.save(data_file, rating)
-        print("# user", self.NUM_USER)
-        print("# movie", self.NUM_MOVIE)
         rating, self.test_case = self.split_dataset(rating)
+        self.NUM_USER = rating.shape[0]
+        self.NUM_MOVIE = rating.shape[1]
+
         self.rating = torch.tensor(rating).to(self.device)
         self.mask = (self.rating > 0)*1.0
         self.mask.to(self.device)
@@ -152,3 +141,7 @@ class CollaborativeFiltering(object):
                 test_case.append((uid, i, rating[uid][i]))
                 rating[uid][i] = 0
         return rating, test_case
+
+    def add_shilling_attacker(self, rating):
+        # TODO
+        return rating

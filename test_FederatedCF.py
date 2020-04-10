@@ -1,50 +1,91 @@
 from FederatedCF import *
 import json
 
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-file_path = '/home/jyfan/data/MoiveLens/ml-1m/'
+#file_path = '/home/jyfan/data/MoiveLens/ml-latest-small/'
+file_path = '/home/jyfan/data/MoiveLens/ml-100k/'
+#file_path = '/home/jyfan/data/MoiveLens/ml-1m/'
 loc_round = 10
-attack_num = 6000
-
-Test_Case = FederatedCF(file_path, attacker=attack_num, defense_alg=True)
-Test_Case.set_loc_iter_round(loc_round)
-Test_Case.set_lr(server_lr=0.1, client_lr=1e-4)
-print("===== parameters =====")
-print("E =", Test_Case.E)
-print("Attackers = ", Test_Case.attacker)
-print("Server lr = ", Test_Case.server_lr)
-print("Client lr = ", Test_Case.client_lr[0])
-print("Dim Feature = ", Test_Case.feature)
-print("Penalty Factor = ", Test_Case.Lambda)
-print("Defense Att = ", Test_Case.defense_alg)
-
-#print("==== CF Model ====")
-x = []  # round num
-y = []  # loss
-
-parameter = {'client_lr': Test_Case.client_lr,
-             'server_lr': Test_Case.server_lr,
-             'dim_feature': Test_Case.feature,
-             'E': Test_Case.E,
-             'penalty factor': Test_Case.Lambda}
-
-init_loss = float(Test_Case.RMSE())
-print(init_loss)
-y.append(init_loss)
-
-#Test_Case.save_global_model(0)
-# Global iteration
-for _ in range(100):
-    Test_Case.global_update()
-    avg_loss = Test_Case.RMSE()
-    print('round', _+1, 'rmse (test case)=', float(avg_loss))
-    y.append(float(avg_loss))
-    #Test_Case.save_global_model(_+1)
 
 
-data = {'RMSE': y, 'parameter': parameter}
+def train(attacker_par, detection):
+    Test_Case = FederatedCF(file_path, attack_par=attacker_par, detection_alg=detection)
+    Test_Case.set_loc_iter_round(loc_round)
+    Test_Case.set_lr(server_lr=0.1, client_lr=1e-4)
+    print("===== parameters =====")
+    print("E =", Test_Case.E)
+    print("Server lr = ", Test_Case.server_lr)
+    print("Client lr = ", Test_Case.client_lr[0])
+    print("Dim Feature = ", Test_Case.feature)
+    print("Penalty Factor = ", Test_Case.Lambda)
+    print("")
+    print("Defense Att = ", Test_Case.detection_alg)
+    print("Attack Model = ", Test_Case.attack_model)
+    print("Target Item = ", Test_Case.target_item)
+    print("Attackers = ", Test_Case.attacker_num)
+    print("Fill items= ", Test_Case.fill_item_num)
 
-with open('/home/jyfan/data/FLRS/FoolGlod_1m_attack'+str(attack_num)+'_fcf.json', 'w') as f:
-#with open('/home/jyfan/data/FLRS/1m_attack'+str(attack_num)+'_fcf.json', 'w') as f:
-    f.write(json.dumps(data, ensure_ascii=False, indent=2))
-print("Finish.")
+    # x = []  # round num
+    y1 = []  # loss
+    y2 = []
+
+    parameter = {'client_lr': Test_Case.client_lr,
+                 'server_lr': Test_Case.server_lr,
+                 'dim_feature': Test_Case.feature,
+                 'E': Test_Case.E,
+                 'penalty factor': Test_Case.Lambda}
+
+    init_loss, global_loss = Test_Case.RMSE()
+    print('init target rmse=', float(init_loss), 'init global rmse=', float(global_loss))
+    y1.append(float(init_loss))
+    y2.append(float(global_loss))
+
+    # Global iteration
+    for _ in range(200):
+        Test_Case.global_update()
+        target_loss, global_loss = Test_Case.RMSE()
+        print('round', _+1, 'target rmse=', float(target_loss), 'golbal rmse=', float(global_loss))
+        y1.append(float(target_loss))
+        y2.append(float(global_loss))
+
+    data = {'target rmse': y1, 'global rmse': y2, 'parameter': parameter}
+    is_detection = ''
+    if detection:
+        is_detection = 'Detection'
+    with open('/home/jyfan/data/FLRS/Shilling/' +
+              is_detection + '_' +
+              file_path.split('/')[-2] + '_' +
+              attacker_par['model'] + '_target' + str(attacker_par['target']) +
+              '_attack' + str(attacker_par['num']) + '_fill' + str(attacker_par['fill']) + '_fcf.json', 'w') as f:
+        f.write(json.dumps(data, ensure_ascii=False, indent=2))
+    #Test_Case.save_delta_item('/home/jyfan/data/FLRS/delta_item/small/target49/' + str(Test_Case.attacker_num) + 'attacker/')
+    print("Finish.")
+
+
+attacker_par = {
+    'num': 583,
+    'fill': 116,
+    'model': 'random',
+    'target': 49   # total 485, average score = 3.15
+}
+train(attacker_par, False)
+
+attacker_par = {
+    'num': 583,
+    'fill': 116,
+    'model': 'uniform',
+    'target': 49   # total 485, average score = 3.15
+}
+train(attacker_par, False)
+
+
+
+
+
+
+
+
+
+

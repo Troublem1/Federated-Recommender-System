@@ -18,7 +18,7 @@ class LocalFCFModel(nn.Module):
         self.rating = loc_rating
         self.mask = self.rating > 0
         self.user_factor = nn.Parameter(nn.init.normal_(torch.empty(1, features), std=0.35), requires_grad=True)
-        self.H = 0  # history of gradients (y')
+        self.H = []  # history of gradients (y')
 
     def forward(self, item_factor):
         """
@@ -47,7 +47,7 @@ class LocalFCFModel(nn.Module):
 
     def add_his_grad(self, grad):
         """Should be invoke after finishing local iterations"""
-        self.H += grad
+        self.H.append(grad.detach().cpu().numpy())
 
 
 class ServerFCFModel(nn.Module):
